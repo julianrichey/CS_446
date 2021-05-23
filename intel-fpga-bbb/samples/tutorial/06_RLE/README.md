@@ -1,4 +1,18 @@
 # RLE
 
-This is a first attempt at getting something working of our own. The software side will send scientific data to be compressed (format? source?). The hardware side will perform run-length encoding then send back. These interfaces should probably look like the interfaces of GhostSZ or something similar??
+This is a first attempt at getting something working of our own.
+
+## First step
+
+Get a memcpy working. cpu -> fpga -> cpu
+fpgaWriteMMIO64 vs csrs.writeCSR? Probably the latter?
+Time them all I guess???
+
+## Second step
+
+Get RLE working. 
+
+## Third step
+
+Get jpeg compression working.
 
