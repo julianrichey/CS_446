@@ -1,6 +1,6 @@
-# RLE
+# Ghost SZ implementation
 
-This is a first attempt at getting something working of our own.
+The ojective of this tutorial is to show an implementaion of Ghost SZ.
 
 ## First step
 
