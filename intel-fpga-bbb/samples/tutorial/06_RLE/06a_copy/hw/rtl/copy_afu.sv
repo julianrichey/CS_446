@@ -80,10 +80,13 @@ module app_afu
     //
     // ====================================================================
 
-    // Count the length of the chain and export it in CSR 0.
-    // Count of data entries read from the linked list and export it in CSR 1.
-    logic [15:0] cnt_list_length;
+    // Count of bytes read and export it in CSR 3.
     logic [15:0] cnt_data_entries;
+
+    // Set when afu finishes. 
+    logic done;
+
+    // logic [15:0] cnt_list_length;
 
     always_comb
     begin
@@ -99,12 +102,12 @@ module app_afu
             csrs.cpu_rd_csrs[i].data = 64'(0);
         end
 
-//need at least 4 csrs
         // Exported counters.  The simple csrs interface used here has
         // no read request.  It expects the current CSR value to be
         // available every cycle.
-        csrs.cpu_rd_csrs[0].data = 64'(cnt_list_length);
-        csrs.cpu_rd_csrs[1].data = 64'(cnt_data_entries);
+        // csrs.cpu_rd_csrs[0].data = 64'(cnt_list_length);
+        csrs.cpu_rd_csrs[3].data = 64'(cnt_data_entries);
+        csrs.cpu_rd_csrs[4].data = 64'(done);
     end
 
 
@@ -115,22 +118,32 @@ module app_afu
     // Memory address to which this AFU will write the result
     t_ccip_clAddr result_addr;
 
-    // CSR 1 triggers list traversal
-    logic start_traversal;
-    t_ccip_clAddr start_traversal_addr;
+    // CSR 4 write triggers afu start
+    logic start;
+    t_ccip_clAddr input_addr;
+
+    // Number of elements 
+    logic [15:0] input_length;
 
     always_ff @(posedge clk)
     begin
-        if (csrs.cpu_wr_csrs[0].en)
+        if (csrs.cpu_wr_csrs[4].en)
         begin
-            result_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[0].data);
+            input_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[0].data);
+            input_length <= byteAddrToClAddr(csrs.cpu_wr_csrs[1].data);
+            result_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
         end
+        //something funky here.. why was just one csr read in this if statement?
+        //come back once i understand the rest
 
-        start_traversal <= csrs.cpu_wr_csrs[1].en;
-        start_traversal_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[1].data);
+        start <= csrs.cpu_wr_csrs[4].en;
     end
 
-//rewrite this guy, will be even simpler. idle, run, end of arr
+//rather than doing a single write at the end (state_write_result)
+//write while in state_run
+
+//may only need 3 states? processing takes time (or will in the future), so maybe still 4
+//but really, the end state can probably just be merged with state_idle
     // =========================================================================
     //
     //   State machine
@@ -141,14 +154,14 @@ module app_afu
     {
         STATE_IDLE,
         STATE_RUN,
-        STATE_END_OF_LIST,
+        STATE_END_OF_INPUT,
         STATE_WRITE_RESULT
     }
     t_state;
 
     t_state state;
     // Status signals that affect state changes
-    logic rd_end_of_list;
+    logic rd_end_of_input;
     logic rd_last_beat_received;
 
     always_ff @(posedge clk)
@@ -162,27 +175,28 @@ module app_afu
             case (state)
               STATE_IDLE:
                 begin
-                    // Traversal begins when CSR 1 is written
-                    if (start_traversal)
+                    // Reading begins when CSR 4 is written
+                    if (start)
                     begin
                         state <= STATE_RUN;
-                        $display("AFU starting traversal at 0x%x",
-                                 clAddrToByteAddr(start_traversal_addr));
+                        $display("AFU starting at 0x%x",
+                                 clAddrToByteAddr(input_addr));
                     end
                 end
 
               STATE_RUN:
                 begin
-                    // rd_end_of_list is set when the "next" pointer
+                    // rd_end_of_input is set when the "next" pointer
                     // in the linked list is NULL.
-                    if (rd_end_of_list)
+//will probably be a compare between a counter and input_length
+                    if (rd_end_of_input)
                     begin
-                        state <= STATE_END_OF_LIST;
-                        $display("AFU reached end of list");
+                        state <= STATE_END_OF_INPUT;
+                        $display("AFU reached end of input");
                     end
                 end
 
-              STATE_END_OF_LIST:
+              STATE_END_OF_INPUT:
                 begin
                     // The NULL pointer indicating the list end has been
                     // reached.  When the remainder of the record containing
@@ -214,6 +228,8 @@ module app_afu
     end
 
 //this simplifies a ton bc no longer worried about pointer chasing
+//instead, just increment addr_next and compare it to input_length rather than check for null ptr
+//NOTE: start editing here
     // =========================================================================
     //
     //   Read logic.
@@ -245,12 +261,13 @@ module app_afu
         // End of list reached if the next address is NULL.  This test
         // is a combination of the same state setting addr_next_valid
         // this cycle, with the addition of a test for a NULL next address.
-        rd_end_of_list <= (byteAddrToClAddr(fiu.c0Rx.data[63:0]) == t_cci_clAddr'(0)) &&
+// (addr_next == input length) or something
+        rd_end_of_input <= (byteAddrToClAddr(fiu.c0Rx.data[63:0]) == t_cci_clAddr'(0)) &&
                           cci_c0Rx_isReadRsp(fiu.c0Rx) &&
                           (fiu.c0Rx.hdr.cl_num == t_cci_clNum'(0));
     end
 
-
+//this should actually stay the exact same?
     //
     // Since back pressure may prevent an immediate read request, we must
     // record whether a read is needed and hold it until the request can
@@ -281,8 +298,8 @@ module app_afu
                 //   - Starting a new walk
                 //   - A read response just arrived from a line containing
                 //     a next pointer.
-                rd_needed <= (start_traversal || (addr_next_valid && ! rd_end_of_list));
-                rd_addr <= (start_traversal ? start_traversal_addr : addr_next);
+                rd_needed <= (start || (addr_next_valid && ! rd_end_of_input));
+                rd_addr <= (start ? input_addr : addr_next);
             end
         end
     end
@@ -318,7 +335,7 @@ module app_afu
         if (reset)
         begin
             fiu.c0Tx.valid <= 1'b0;
-            cnt_list_length <= 0;
+            // cnt_list_length <= 0;
         end
         else
         begin
@@ -328,7 +345,7 @@ module app_afu
 
             if (rd_needed && ! fiu.c0TxAlmFull)
             begin
-                cnt_list_length <= cnt_list_length + 1;
+                // cnt_list_length <= cnt_list_length + 1;
                 $display("  Reading from VA 0x%x", clAddrToByteAddr(rd_addr));
             end
         end
@@ -338,7 +355,7 @@ module app_afu
     //
     // READ RESPONSE HANDLING
     //
-
+//no hash
     //
     // Registers requesting the addition of read data to the hash.
     //
@@ -386,7 +403,7 @@ module app_afu
       hash
        (
         .clk,
-        .reset(reset || start_traversal),
+        .reset(reset || start),
         .en(hash_data_en),
         .new_data(hash_data),
         .value(hash_value)
@@ -398,7 +415,7 @@ module app_afu
     //
     always_ff @(posedge clk)
     begin
-        if (reset || start_traversal)
+        if (reset || start)
         begin
             cnt_data_entries <= 0;
         end
@@ -427,6 +444,14 @@ module app_afu
     // CPU-side software will spin, waiting for this flag.  The computed
     // hash is written in the 2nd 64 bit word.
     assign fiu.c1Tx.data = t_ccip_clData'({ hash_value, 64'h1 });
+//is this 128bits/cycle? how to change address as it goes?
+//once compressing, this will probably get harder
+//need a fifo probably???
+//if an input is x bits wide
+//the output could be x-y or x+y or x or whatever bits wide
+//likely shove it all into a fifo that gets consumed down here
+//an alternative that just sends the compressed version of each element might kinda defeat the acceleration intent??
+//like if the cpu had to come in and rearrange memory
 
     // Control logic for memory writes
     always_ff @(posedge clk)
@@ -438,7 +463,7 @@ module app_afu
         else
         begin
             // Request the write as long as the channel isn't full.
-            fiu.c1Tx.valid <= ((state == STATE_WRITE_RESULT) &&
+            fiu.c1Tx.valid <= ((state == STATE_WRITE_RESULT) && //will do the writing in the run state
                                ! fiu.c1TxAlmFull);
         end
 

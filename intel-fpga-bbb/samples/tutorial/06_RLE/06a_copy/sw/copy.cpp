@@ -48,133 +48,106 @@ using namespace opae::fpga::bbb::mpf::types;
 // State from the AFU's JSON file, extracted using OPAE's afu_json_mgr script
 #include "afu_json_info.h"
 
-//
-// A simple data structure for our example.  It contains 4 memory lines in
-// which the last 3 lines hold values in the low word and the 1st line
-// holds a pointer to the next entry in the list.  The pad fields are
-// unused.
-//
-// typedef struct t_linked_list
-// {
-//     t_linked_list* next;
-//     uint64_t pad_next[7];
+const int INPUT_INTS = 1024; //arbitrary for now
 
-//     uint64_t v0;
-//     uint64_t pad0[7];
+//for now, just use ints. ghostsz apparently uses ints, floats, and doubles
+//one memory line is 64 bytes - is this relevant?
+//just using this struct to keep code close to tutorial
+typedef struct t_mem
+{
+    int data[INPUT_INTS];
+}
+t_mem;
 
-//     uint64_t v1;
-//     uint64_t pad1[7];
+t_mem* initMem(t_mem* head)
+{
+    int v = 1;
 
-//     uint64_t v2;
-//     uint64_t pad2[7];
-// }
-// t_linked_list;
+    for (int i = 0; i < INPUT_INTS; i += 1)
+    {
+        head->data[i] = v++;
+    }
 
-//
-// Construct a linked list of type t_linked_list in a buffer starting at
-// head.  Generated the list with n_entries, separating each entry by
-// spacing_bytes.
-//
-// Both head and spacing_bytes must be cache-line aligned.
-//
-// t_linked_list* initList(t_linked_list* head,
-//                         uint64_t n_entries,
-//                         uint64_t spacing_bytes)
-// {
-//     t_linked_list* p = head;
-//     uint64_t v = 1;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 
-//     for (int i = 0; i < n_entries; i += 1)
-//     {
-//         p->v0 = v++;
-//         p->v1 = v++;
-//         p->v2 = v++;
+    return head;
+}
 
-//         t_linked_list* p_next = (t_linked_list*)(intptr_t(p) + spacing_bytes);
-//         p->next = (i+1 < n_entries) ? p_next : NULL;
-
-//         p = p_next;
-//     }
-
-//     // Force all initialization to memory before the buffer is passed to the FPGA.
-//     std::atomic_thread_fence(std::memory_order_seq_cst);
-
-//     return head;
-// }
-
+/*
+CSRs
+0: write ptr to input buffer
+1: write number of elements in input buffer
+2: write ptr to output buffer
+3: read number of elements in used portion of output buffer
+4: read whether the afu has finished
+*/
 
 int main(int argc, char *argv[])
 {
-    // Find and connect to the accelerator
     OPAE_SVC_WRAPPER fpga(AFU_ACCEL_UUID);
     assert(fpga.isOk());
-
-    // Connect the CSR manager
     CSR_MGR csrs(fpga);
 
-//almost certainly no need for virtual addresses here?? disable in cci_mpf_app_conf.vh
-//first, try with virtual addresses just to make sure stuff works
-    // Allocate a memory buffer for storing the result.  Unlike the hello
-    // world examples, here we do not need the physical address of the
-    // buffer.  The accelerator instantiates MPF's VTP and will use
-    // virtual addresses.
-    auto result_buf_handle = fpga.allocBuffer(getpagesize());
-    auto result_buf = reinterpret_cast<volatile uint64_t*>(result_buf_handle->c_type());
-    assert(NULL != result_buf);
+    int input_bytes = INPUT_INTS * 4;
+    auto input_buf_handle = fpga.allocBuffer(input_bytes);
+    auto input_buf = reinterpret_cast<volatile uint64_t*>(input_buf_handle->c_type());
+    assert(NULL != input_buf);
+    csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t? ill just roll with it
+    csrs.writeCSR(1, INPUT_INTS);
 
-    // Set the low word of the shared buffer to 0.  The FPGA will write
-    // a non-zero value to it.
-    result_buf[0] = 0;
+    initMem(const_cast<t_mem*>(input_buf));
 
-    // Set the result buffer pointer
-    csrs.writeCSR(0, intptr_t(result_buf));
+    int output_bytes = input_bytes * 2; //adjust based on worst case
+    auto output_buf_handle = fpga.allocBuffer(output_bytes);
+    auto output_buf = reinterpret_cast<volatile uint64_t*>(output_buf_handle->c_type());
+    assert(NULL != output_buf);
+    output_buf[0] = 0; //probably delete this line
+    csrs.writeCSR(2, intptr_t(output_buf));
 
-//how will this change??
-    // Allocate a 16MB buffer and share it with the FPGA.  Because the FPGA
-    // is using VTP we can allocate a virtually contiguous region.
-    // OPAE_SVC_WRAPPER detects the presence of VTP and uses it for memory
-    // allocation instead of calling OPAE directly.  The buffer will
-    // be composed of physically discontiguous pages.  VTP will construct
-    // a private TLB to map virtual addresses from this process to FPGA-side
-    // physical addresses.
-    auto list_buf_handle = fpga.allocBuffer(16 * 1024 * 1024);
-    auto list_buf = reinterpret_cast<volatile t_linked_list*>(list_buf_handle->c_type());
-    assert(NULL != list_buf);
+    csrs.writeCSR(3, 0);
+    csrs.writeCSR(4, 0); //fpga waiting for this
 
-//write a different init function
-//first this should just populate with some random data to compress or copy
-//then maybe if we want to check out coherence type stuff this can intermittently be updated?
-    // Initialize a linked list in the buffer
-    initList(const_cast<t_linked_list*>(list_buf), 32, 0x80000);
-
-    // Start the FPGA, which is waiting for the list head in CSR 1.
-    csrs.writeCSR(1, intptr_t(list_buf));
-
-    // Spin, waiting for the value in memory to change to something non-zero.
     struct timespec pause;
-    // Longer when simulating
     pause.tv_sec = (fpga.hwIsSimulated() ? 1 : 0);
-    pause.tv_nsec = 2500000;
+    pause.tv_nsec = 2500000; //could adjust this but probably doesnt matter
 
-    while (0 == result_buf[0])
+    //control signal indicating done
+    //cant use normal output, as last written index not known ahead of time
+    while (0 == csrs.readCSR(4))
     {
         nanosleep(&pause, NULL);
     };
 
-    // Hash is stored in result_buf[1]
-    uint64_t r = result_buf[1];
-    cout << "Hash: 0x" << hex << r << dec << "  ["
-         << ((0x5726aa1d == r) ? "Correct" : "ERROR")
-         << "]" << endl << endl;
+    //confirm output
 
-    // Reads CSRs to get some statistics
-    cout << "# List length: " << csrs.readCSR(0) << endl
-         << "# Linked list data entries read: " << csrs.readCSR(1) << endl;
+    int v = 1;
+    int n_errors = 0;
 
-    cout << "#" << endl
-         << "# AFU frequency: " << csrs.getAFUMHz() << " MHz"
-         << (fpga.hwIsSimulated() ? " [simulated]" : "")
-         << endl;
+    used_output_bytes = csrs.readCSR(3) * 4;
+
+    for (int i = 0; i < used_output_bytes; i++)
+    {
+        if (*(output_buf + i) != v++)
+            n_errors++;
+    }
+
+    cout << "Number of memcpy errors: " << n_errors;
+
+
+    // // Hash is stored in result_buf[1]
+    // uint64_t r = result_buf[1];
+    // cout << "Hash: 0x" << hex << r << dec << "  ["
+    //      << ((0x5726aa1d == r) ? "Correct" : "ERROR")
+    //      << "]" << endl << endl;
+
+    // // Reads CSRs to get some statistics
+    // cout << "# List length: " << csrs.readCSR(0) << endl
+    //      << "# Linked list data entries read: " << csrs.readCSR(1) << endl;
+
+    // cout << "#" << endl
+    //      << "# AFU frequency: " << csrs.getAFUMHz() << " MHz"
+    //      << (fpga.hwIsSimulated() ? " [simulated]" : "")
+    //      << endl;
 
     // MPF VTP (virtual to physical) statistics
     mpf_handle::ptr_t mpf = fpga.mpf;
