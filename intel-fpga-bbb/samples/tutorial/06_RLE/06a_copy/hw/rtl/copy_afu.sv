@@ -80,8 +80,8 @@ module app_afu
     //
     // ====================================================================
 
-    // Count of bytes read and export it in CSR 3.
-    logic [15:0] cnt_data_entries;
+    // Count bytes generated and export in CSR 3.
+    logic [15:0] output_counter;
 
     // Set when afu finishes. 
     logic done;
@@ -105,8 +105,7 @@ module app_afu
         // Exported counters.  The simple csrs interface used here has
         // no read request.  It expects the current CSR value to be
         // available every cycle.
-        // csrs.cpu_rd_csrs[0].data = 64'(cnt_list_length);
-        csrs.cpu_rd_csrs[3].data = 64'(cnt_data_entries);
+        csrs.cpu_rd_csrs[3].data = 64'(output_counter);
         csrs.cpu_rd_csrs[4].data = 64'(done);
     end
 
@@ -115,8 +114,8 @@ module app_afu
     // Consume configuration CSR writes
     //
 
-    // Memory address to which this AFU will write the result
-    t_ccip_clAddr result_addr;
+    // First memory address to which this AFU will write the result
+    t_ccip_clAddr output_addr;
 
     // CSR 4 write triggers afu start
     logic start;
@@ -131,19 +130,14 @@ module app_afu
         begin
             input_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[0].data);
             input_length <= byteAddrToClAddr(csrs.cpu_wr_csrs[1].data);
-            result_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
+            output_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
         end
-        //something funky here.. why was just one csr read in this if statement?
-        //come back once i understand the rest
 
         start <= csrs.cpu_wr_csrs[4].en;
     end
 
 //rather than doing a single write at the end (state_write_result)
 //write while in state_run
-
-//may only need 3 states? processing takes time (or will in the future), so maybe still 4
-//but really, the end state can probably just be merged with state_idle
     // =========================================================================
     //
     //   State machine
@@ -186,9 +180,7 @@ module app_afu
 
               STATE_RUN:
                 begin
-                    // rd_end_of_input is set when the "next" pointer
-                    // in the linked list is NULL.
-//will probably be a compare between a counter and input_length
+                    // rd_end_of_input is set once as input_length elements are read
                     if (rd_end_of_input)
                     begin
                         state <= STATE_END_OF_INPUT;
@@ -196,28 +188,19 @@ module app_afu
                     end
                 end
 
-              STATE_END_OF_INPUT:
+              STATE_END_OF_INPUT: //TODO: figure out how states change from here.
                 begin
-                    // The NULL pointer indicating the list end has been
-                    // reached.  When the remainder of the record containing
-                    // the NULL pointer has been processed completely it
-                    // will be time to write the response.
-                    if (rd_last_beat_received)
+                    if (rd_last_beat_received) //rename
                     begin
                         state <= STATE_WRITE_RESULT;
                         $display("AFU write result to 0x%x",
-                                 clAddrToByteAddr(result_addr));
+                                 clAddrToByteAddr(output_addr));
                     end
                 end
 
               STATE_WRITE_RESULT:
                 begin
-                    // The end of the list has been reached.  The AFU must
-                    // write the computed hash to result_addr.  It is the
-                    // only memory write the AFU will request.  The write
-                    // will be triggered as soon as the pipeline can
-                    // accept requests.
-                    if (! fiu.c1TxAlmFull)
+                    if (! fiu.c1TxAlmFull) //change
                     begin
                         state <= STATE_IDLE;
                         $display("AFU done");
@@ -235,6 +218,36 @@ module app_afu
     //   Read logic.
     //
     // =========================================================================
+
+    logic [15:0] input_counter;
+    always_ff @(posedge clk)
+    begin
+        if (reset)
+        begin
+            input_counter <= 16'b0;
+        end
+        else
+        begin
+            if (start)
+            begin
+                input_counter <= 16'b1;
+            end
+            else if (input_counter == input_length - 1) //TODO: potential off by 1
+            begin
+                rd_end_of_input <= 1'b1; //hold counter until reset or start
+            end
+            else if (input_counter != 16'b0) //add condition if there is any reason to delay incrementing memory.. fiu stuff
+            begin
+                input_counter <= input_counter + 16'b1;
+            end
+        end
+    end
+
+
+
+
+
+
 
     //
     // READ REQUEST
@@ -410,20 +423,35 @@ module app_afu
         );
 
 
-    //
-    // Count the number of fields read and added to the hash.
-    //
-    always_ff @(posedge clk)
-    begin
-        if (reset || start)
-        begin
-            cnt_data_entries <= 0;
-        end
-        else if (hash_data_en)
-        begin
-            cnt_data_entries <= cnt_data_entries + 1;
-        end
-    end
+    // //
+    // // Count the number of fields read and added to the hash.
+    // //
+    // always_ff @(posedge clk)
+    // begin
+    //     if (reset || start)
+    //     begin
+    //         output_counter <= 0;
+    //     end
+    //     else if (hash_data_en)
+    //     begin
+    //         output_counter <= output_counter + 1;
+    //     end
+    // end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 //writing out lots of data, not just a hash. should be similar to what read ends up looking like
     // =========================================================================
@@ -432,11 +460,34 @@ module app_afu
     //
     // =========================================================================
 
+
+    // always_ff @(posedge clk)
+    // begin
+    //     if (reset)
+    //     begin
+    //         output_counter <= 1'b0;
+    //     end
+    //     else
+    //     begin
+    //         //TODO: how to count these?
+    //         //for memcpy, just use input_counter
+    //     end
+    // end
+
+
+
+
+
+
+
+
+
+
     // Construct a memory write request header.  For this AFU it is always
     // the same, since we write to only one address.
     t_cci_mpf_c1_ReqMemHdr wr_hdr;
     assign wr_hdr = cci_mpf_c1_genReqHdr(eREQ_WRLINE_I,
-                                         result_addr,
+                                         output_addr,
                                          t_cci_mdata'(0),
                                          cci_mpf_defaultReqHdrParams(1));
 
@@ -477,3 +528,103 @@ module app_afu
     assign fiu.c2Tx.mmioRdValid = 1'b0;
 
 endmodule // app_afu
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+
+beneath is a fifo
+it needs to take in an extra input, din_used
+x bits of input data gets converted to y bits of compressed data
+assume that y can be any value up to some multiple of x, set din width
+app_afu will give this the width of y
+
+something like this may also need to happen on the input???
+example: if doing a RLE, where the maximum run it can encode is
+    256 bits for example, would need a fifo(?) up front that keeps
+    on recording if the input is repeatedly the same
+would this even be a fifo? could it be just part of the read logic?
+
+
+TODO: this fifo is currently doesnt take in din_used and is written
+    in verilog
+make q 1d, just a long circular buffer
+output 32 bits every cycle rd_en is set
+
+*/
+
+/*
+`define CLOG2(x) \
+    (x <= 2) ? 1 : \
+    (x <= 4) ? 2 : \
+    (x <= 8) ? 3 : \
+    (x <= 16) ? 4 : \
+    (x <= 32) ? 5 : \
+    (x <= 64) ? 6 : \
+    (x <= 128) ? 7 : \
+    (x <= 256) ? 8 : \
+    (x <= 512) ? 9 : \
+    (x <= 1024) ? 10 : \
+    (x <= 2048) ? 11 : \
+    (x <= 4096) ? 12 : \
+    -1
+
+module fifo #(
+    parameter FIFO_BUFFER_SIZE,
+    parameter FIFO_DATA_WIDTH
+) (
+    input reset,
+
+    input wr_clk,
+    input wr_en,
+    input [FIFO_DATA_WIDTH-1:0] din,
+    output reg full,
+
+    input rd_clk,
+    input rd_en,
+    output reg [FIFO_DATA_WIDTH-1:0] dout,
+    output reg empty
+);
+    //{} for +1 overflow (e.g. depth=8)
+    localparam idx_width = {1'b0, `CLOG2(FIFO_BUFFER_SIZE)} + 1;
+
+    reg [FIFO_DATA_WIDTH-1:0] q [FIFO_BUFFER_SIZE-1:0];
+    reg [idx_width-1:0] wr_idx;
+    reg [idx_width-1:0] rd_idx;
+
+    assign dout = q[rd_idx[idx_width-2:0]];
+    assign empty = wr_idx == rd_idx;
+    assign full = (wr_idx[idx_width-1] != rd_idx[idx_width-1]) && 
+                  (wr_idx[idx_width-2:0] == rd_idx[idx_width-2:0]);
+
+    integer i;
+    always @(posedge wr_clk) begin
+        if (reset) begin
+            wr_idx <= 0;
+            for (i=0; i<FIFO_BUFFER_SIZE; i=i+1) q[i] <= 0;
+        end else if (wr_en) begin
+            q[wr_idx[idx_width-2:0]] <= din;
+            wr_idx <= wr_idx + 1;
+        end
+    end
+
+    always @(posedge rd_clk) begin
+        if (reset) begin
+            rd_idx <= 0;
+        end else if (rd_en) begin
+            rd_idx <= rd_idx + 1;
+        end
+    end
+endmodule
+*/

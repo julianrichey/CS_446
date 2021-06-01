@@ -61,7 +61,7 @@ t_mem;
 
 t_mem* initMem(t_mem* head)
 {
-    int v = 1;
+    int v = 1; //different contents will compress differently, replace this
 
     for (int i = 0; i < INPUT_INTS; i += 1)
     {
@@ -80,6 +80,8 @@ CSRs
 2: write ptr to output buffer
 3: read number of elements in used portion of output buffer
 4: read whether the afu has finished
+
+example reuses CSRs, but for no now need
 */
 
 int main(int argc, char *argv[])
