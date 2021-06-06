@@ -53,10 +53,11 @@ using namespace opae::fpga::bbb::mpf::types;
 const int LINE_BYTES = 64;
 const int INPUT_LINES = 10; //arbitrary for now
 
-struct t_line
+typedef struct t_line
 {
     int data[16];
-};
+}
+t_line;
 
 t_line* initMem(t_line* ptr) //ptr points to the first t_line
 {
@@ -100,16 +101,16 @@ int main(int argc, char *argv[])
 
     int input_bytes = INPUT_LINES * LINE_BYTES;
     auto input_buf_handle = fpga.allocBuffer(input_bytes);
-    auto input_buf = reinterpret_cast<volatile uint64_t*>(input_buf_handle->c_type());
+    auto input_buf = reinterpret_cast<volatile t_line*>(input_buf_handle->c_type());
     assert(NULL != input_buf);
     csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t?
     csrs.writeCSR(1, INPUT_LINES);
 
-    initMem(const_cast<t_mem*>(input_buf));
+    initMem(const_cast<t_line*>(input_buf));
 
     int output_bytes = input_bytes * 2; //adjust based on worst case
     auto output_buf_handle = fpga.allocBuffer(output_bytes);
-    auto output_buf = reinterpret_cast<volatile uint64_t*>(output_buf_handle->c_type());
+    auto output_buf = reinterpret_cast<volatile int*>(output_buf_handle->c_type());
     assert(NULL != output_buf);
     output_buf[0] = 0; //probably delete this line
     csrs.writeCSR(2, intptr_t(output_buf));
@@ -137,8 +138,9 @@ int main(int argc, char *argv[])
 
     for (int i = 0; i < output_ints; i++)
     {
-        if ((int)*(output_buf + i) != v++)
+        if (*(output_buf + i*4) != v++)
             n_errors++;
+            cout << *(output_buf + i*4);
     }
 
     cout << "Number of memcpy errors: " << n_errors;
