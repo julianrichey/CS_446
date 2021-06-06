@@ -81,7 +81,7 @@ module app_afu
     // ====================================================================
 
     // Count bytes generated and export in CSR 3.
-    logic [15:0] output_counter;
+    logic [15:0] output_length;
 
     // Set when afu finishes. 
     logic done;
@@ -105,7 +105,7 @@ module app_afu
         // Exported counters.  The simple csrs interface used here has
         // no read request.  It expects the current CSR value to be
         // available every cycle.
-        csrs.cpu_rd_csrs[3].data = 64'(output_counter);
+        csrs.cpu_rd_csrs[3].data = 64'(output_length);
         csrs.cpu_rd_csrs[4].data = 64'(done);
     end
 
@@ -121,7 +121,7 @@ module app_afu
     logic start;
     t_ccip_clAddr input_addr;
 
-    // Number of elements 
+    // Number of elements (lines)
     logic [15:0] input_length;
 
     always_ff @(posedge clk)
@@ -129,7 +129,7 @@ module app_afu
         if (csrs.cpu_wr_csrs[4].en)
         begin
             input_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[0].data);
-            input_length <= byteAddrToClAddr(csrs.cpu_wr_csrs[1].data);
+            input_length <= csrs.cpu_wr_csrs[1].data;
             output_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
         end
 
@@ -149,19 +149,23 @@ module app_afu
         STATE_IDLE,
         STATE_RUN,
         STATE_END_OF_INPUT,
-        STATE_WRITE_RESULT
+        STATE_DONE
     }
     t_state;
 
     t_state state;
     // Status signals that affect state changes
     logic rd_end_of_input;
-    logic rd_last_beat_received;
+    // logic rd_last_beat_received;
+    logic data_in_en;
+    t_cci_clAddr wr_addr;
 
     always_ff @(posedge clk)
     begin
         if (reset)
         begin
+            done <= 1'b0;
+            output_length <= 16'b0;
             state <= STATE_IDLE;
         end
         else
@@ -172,6 +176,8 @@ module app_afu
                     // Reading begins when CSR 4 is written
                     if (start)
                     begin
+                        done <= 1'b0;
+                        output_length <= 16'b0;
                         state <= STATE_RUN;
                         $display("AFU starting at 0x%x",
                                  clAddrToByteAddr(input_addr));
@@ -180,7 +186,7 @@ module app_afu
 
               STATE_RUN:
                 begin
-                    // rd_end_of_input is set once as input_length elements are read
+                    // rd_end_of_input is set once as input_length lines are read
                     if (rd_end_of_input)
                     begin
                         state <= STATE_END_OF_INPUT;
@@ -190,18 +196,20 @@ module app_afu
 
               STATE_END_OF_INPUT: //TODO: figure out how states change from here.
                 begin
-                    if (rd_last_beat_received) //rename
+                    if (data_in_en) //rd_last_beat_received needed to wait for 4 lines. only using 1 line, so use first (only) response
                     begin
-                        state <= STATE_WRITE_RESULT;
+                        state <= STATE_DONE;
                         $display("AFU write result to 0x%x",
-                                 clAddrToByteAddr(output_addr));
+                                 clAddrToByteAddr(wr_addr));
                     end
                 end
 
-              STATE_WRITE_RESULT:
+              STATE_DONE:
                 begin
-                    if (! fiu.c1TxAlmFull) //change
+                    if (! fiu.c1TxAlmFull)
                     begin
+                        done <= 1'b1;
+                        output_length <= wr_addr - output_addr + 1;
                         state <= STATE_IDLE;
                         $display("AFU done");
                     end
@@ -210,83 +218,27 @@ module app_afu
         end
     end
 
-//this simplifies a ton bc no longer worried about pointer chasing
-//instead, just increment addr_next and compare it to input_length rather than check for null ptr
-//NOTE: start editing here
+
     // =========================================================================
     //
     //   Read logic.
     //
     // =========================================================================
 
-    logic [15:0] input_counter;
-    always_ff @(posedge clk)
-    begin
-        if (reset)
-        begin
-            input_counter <= 16'b0;
-        end
-        else
-        begin
-            if (start)
-            begin
-                input_counter <= 16'b1;
-            end
-            else if (input_counter == input_length - 1) //TODO: potential off by 1
-            begin
-                rd_end_of_input <= 1'b1; //hold counter until reset or start
-            end
-            else if (input_counter != 16'b0) //add condition if there is any reason to delay incrementing memory.. fiu stuff
-            begin
-                input_counter <= input_counter + 16'b1;
-            end
-        end
-    end
-
-
-
-
-
-
-
-    //
-    // READ REQUEST
-    //
-
-    // Did a read response just arrive containing a pointer to the next entry
-    // in the list?
-    logic addr_next_valid;
-
-    // When a read response contains a next pointer, this is the next address.
-    t_cci_clAddr addr_next;
-
-    always_ff @(posedge clk)
-    begin
-        // Read response from the first line in a 4 line group?  The next
-        // pointer is in the first line of each 4-line object.  The read
-        // response header's cl_num is 0 for the first line.
-        addr_next_valid <= cci_c0Rx_isReadRsp(fiu.c0Rx) &&
-                           (fiu.c0Rx.hdr.cl_num == t_cci_clNum'(0));
-
-        // Next address is in the low word of the line
-        addr_next <= byteAddrToClAddr(fiu.c0Rx.data[63:0]);
-
-        // End of list reached if the next address is NULL.  This test
-        // is a combination of the same state setting addr_next_valid
-        // this cycle, with the addition of a test for a NULL next address.
-// (addr_next == input length) or something
-        rd_end_of_input <= (byteAddrToClAddr(fiu.c0Rx.data[63:0]) == t_cci_clAddr'(0)) &&
-                          cci_c0Rx_isReadRsp(fiu.c0Rx) &&
-                          (fiu.c0Rx.hdr.cl_num == t_cci_clNum'(0));
-    end
-
-//this should actually stay the exact same?
-    //
-    // Since back pressure may prevent an immediate read request, we must
-    // record whether a read is needed and hold it until the request can
-    // be sent to the FIU.
-    //
     t_cci_clAddr rd_addr;
+    t_cci_clAddr rd_addr_next;
+    logic rd_addr_next_valid;
+    
+    always_ff @(posedge clk)
+    begin
+        rd_addr_next_valid <= cci_c0Rx_isReadRsp(fiu.c0Rx);
+        rd_addr_next <= rd_addr + 1;
+        //rd_addr or rd_addr_next? probably rd_addr_next because in example,
+        //rd_end_of_input is set once rd_addr_next is NULL
+        rd_end_of_input <= (rd_addr_next == (input_addr + input_length));
+    end
+
+    //hold request until can be sent (have next address, not full)
     logic rd_needed;
 
     always_ff @(posedge clk)
@@ -297,214 +249,128 @@ module app_afu
         end
         else
         begin
-            // If reads are allowed this cycle then we can safely clear
-            // any previously requested reads.  This simple AFU has only
-            // one read in flight at a time since it is walking a pointer
-            // chain.
+            //might want more than one read in flight? just one for now, keep current rd_needed logic
             if (rd_needed)
             begin
                 rd_needed <= fiu.c0TxAlmFull;
             end
             else
             begin
-                // Need a read under two conditions:
-                //   - Starting a new walk
-                //   - A read response just arrived from a line containing
-                //     a next pointer.
-                rd_needed <= (start || (addr_next_valid && ! rd_end_of_input));
-                rd_addr <= (start ? input_addr : addr_next);
+                //rd_addr_next_valid always set, could slow down input by setting every x cycles
+                rd_needed <= (start || (rd_addr_next_valid && ! rd_end_of_input));
+                rd_addr <= (start ? input_addr : rd_addr_next);
             end
         end
     end
 
-
-    //
-    // Emit read requests to the FIU.
-    //
-
-    // Read header defines the request to the FIU
+    //construct request
     t_cci_mpf_c0_ReqMemHdr rd_hdr;
     t_cci_mpf_ReqMemHdrParams rd_hdr_params;
 
     always_comb
     begin
-        // Use virtual addresses
         rd_hdr_params = cci_mpf_defaultReqHdrParams(1);
-        // Let the FIU pick the channel
         rd_hdr_params.vc_sel = eVC_VA;
-        // Read 4 lines (the size of an entry in the list)
-        rd_hdr_params.cl_len = eCL_LEN_4;
-
-        // Generate the header
-        rd_hdr = cci_mpf_c0_genReqHdr(eREQ_RDLINE_I,
-                                      rd_addr,
-                                      t_cci_mdata'(0),
-                                      rd_hdr_params);
+        rd_hdr_params.cl_len = eCL_LEN_1; //read one line for now?
+        rd_hdr = cci_mpf_c0_genReqHdr(
+            eREQ_RDLINE_I,
+            rd_addr,
+            t_cci_mdata'(0),
+            rd_hdr_params
+        );
     end
 
-    // Send read requests to the FIU
     always_ff @(posedge clk)
     begin
         if (reset)
         begin
             fiu.c0Tx.valid <= 1'b0;
-            // cnt_list_length <= 0;
         end
         else
         begin
-            // Generate a read request when needed and the FIU isn't full
-            fiu.c0Tx <= cci_mpf_genC0TxReadReq(rd_hdr,
-                                               (rd_needed && ! fiu.c0TxAlmFull));
-
-            if (rd_needed && ! fiu.c0TxAlmFull)
-            begin
-                // cnt_list_length <= cnt_list_length + 1;
-                $display("  Reading from VA 0x%x", clAddrToByteAddr(rd_addr));
-            end
+            fiu.c0Tx <= cci_mpf_genC0TxReadReq(rd_hdr, (rd_needed && ! fiu.c0TxAlmFull));
+            // if (rd_needed && ! fiu.c0TxAlmFull)
+            // begin
+            //     $display("  Reading from VA 0x%x", clAddrToByteAddr(rd_addr));
+            // end
         end
     end
 
+    logic [511:0] data_in;
 
-    //
-    // READ RESPONSE HANDLING
-    //
-//no hash
-    //
-    // Registers requesting the addition of read data to the hash.
-    //
-    logic hash_data_en;
-    logic [31:0] hash_data;
-    // The cache-line number of the associated data is recorded in order
-    // to figure out when reading is complete.  We will have read all
-    // the data when the 4th beat of the final request is read.
-    t_cci_clNum hash_cl_num;
-
-    //
-    // Receive data (read responses).
-    //
+//interesting... each line comes indepently on the bus, right?
+//if all being added to the hash and order matteres, bus maintains order?
     always_ff @(posedge clk)
     begin
-        // A read response is data if the cl_num is non-zero.  (When cl_num
-        // is zero the response is a pointer to the next record.)
-        hash_data_en <= (cci_c0Rx_isReadRsp(fiu.c0Rx) &&
-                         (fiu.c0Rx.hdr.cl_num != t_cci_clNum'(0)));
-        hash_data <= fiu.c0Rx.data[31:0];
-        hash_cl_num <= fiu.c0Rx.hdr.cl_num;
+        data_in_en <= cci_c0Rx_isReadRsp(fiu.c0Rx);
+        data_in <= fiu.c0Rx.data[511:0];
 
-        if (cci_c0Rx_isReadRsp(fiu.c0Rx) &&
-            (fiu.c0Rx.hdr.cl_num != t_cci_clNum'(0)))
-        begin
-            $display("    Received entry v%0d: %0d",
-                     fiu.c0Rx.hdr.cl_num, fiu.c0Rx.data[63:0]);
-        end
+        // if (cci_c0Rx_isReadRsp(fiu.c0Rx))
+        // begin
+        //     $display("    Received entry v: %0d", fiu.c0Rx.data[511:0]);
+        // end
     end
 
 
-    //
-    // Signal completion of reading a line.  The state machine consumes this
-    // to transition from END_OF_LIST to WRITE_RESULT.
-    //
-    assign rd_last_beat_received = hash_data_en &&
-                                   (hash_cl_num == t_cci_clNum'(3));
-
-    //
-    // Compute a hash of the received data.
-    //
-    logic [31:0] hash_value;
-
-    hash32
-      hash
-       (
-        .clk,
-        .reset(reset || start),
-        .en(hash_data_en),
-        .new_data(hash_data),
-        .value(hash_value)
-        );
-
-
-    // //
-    // // Count the number of fields read and added to the hash.
-    // //
-    // always_ff @(posedge clk)
-    // begin
-    //     if (reset || start)
-    //     begin
-    //         output_counter <= 0;
-    //     end
-    //     else if (hash_data_en)
-    //     begin
-    //         output_counter <= output_counter + 1;
-    //     end
-    // end
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-//writing out lots of data, not just a hash. should be similar to what read ends up looking like
     // =========================================================================
     //
     //   Write logic.
     //
     // =========================================================================
 
+    t_cci_clAddr wr_addr_next;
+    logic wr_addr_next_valid; //delete? maybe not if need to check against upper bound, if it exists
 
-    // always_ff @(posedge clk)
-    // begin
-    //     if (reset)
-    //     begin
-    //         output_counter <= 1'b0;
-    //     end
-    //     else
-    //     begin
-    //         //TODO: how to count these?
-    //         //for memcpy, just use input_counter
-    //     end
-    // end
+    always_ff @(posedge clk)
+    begin
+        wr_addr_next_valid <= cci_c1Rx_isWriteRsp(fiu.c1Tx); 
+        wr_addr_next <= wr_addr + 1;
+    end
 
+    //hold request until can be sent (have next address, not full)
+    logic wr_needed; //just assume we can always write? or does the example skip checking bc only one write???
+    logic buffer_consumed; //set once input contents have been consumed from buffer
+    assign buffer_consumed = rd_end_of_input; //for copy, buffer not used
 
+    always_ff @(posedge clk)
+    begin
+        if (reset)
+        begin
+            wr_needed <= 1'b0;
+        end
+        else
+        begin
+            //might want more than one write in flight? just one for now, keep current wr_needed logic
+            if (wr_needed)
+            begin
+                wr_needed <= fiu.c1TxAlmFull; //'TxAlmFull' for both rd and wr?
+            end
+            else
+            begin
+                //wr_addr_next_valid always set, could slow down input by setting every x cycles
+                wr_needed <= (start || (wr_addr_next_valid || ! buffer_consumed));
+                wr_addr <= (start ? output_addr : wr_addr_next);
+            end
+        end
+    end
 
-
-
-
-
-
-
-
-    // Construct a memory write request header.  For this AFU it is always
-    // the same, since we write to only one address.
+    //construct request
     t_cci_mpf_c1_ReqMemHdr wr_hdr;
-    assign wr_hdr = cci_mpf_c1_genReqHdr(eREQ_WRLINE_I,
-                                         output_addr,
-                                         t_cci_mdata'(0),
-                                         cci_mpf_defaultReqHdrParams(1));
+    t_cci_mpf_ReqMemHdrParams wr_hdr_params;
 
-    // Data to write to memory.  The low word is a non-zero flag.  The
-    // CPU-side software will spin, waiting for this flag.  The computed
-    // hash is written in the 2nd 64 bit word.
-    assign fiu.c1Tx.data = t_ccip_clData'({ hash_value, 64'h1 });
-//is this 128bits/cycle? how to change address as it goes?
-//once compressing, this will probably get harder
-//need a fifo probably???
-//if an input is x bits wide
-//the output could be x-y or x+y or x or whatever bits wide
-//likely shove it all into a fifo that gets consumed down here
-//an alternative that just sends the compressed version of each element might kinda defeat the acceleration intent??
-//like if the cpu had to come in and rearrange memory
+    always_comb
+    begin
+        wr_hdr_params = cci_mpf_defaultReqHdrParams(1);
+        wr_hdr_params.vc_sel = eVC_VA;
+        wr_hdr_params.cl_len = eCL_LEN_1;
+        wr_hdr = cci_mpf_c1_genReqHdr(
+            eREQ_WRLINE_I,
+            wr_addr,
+            t_cci_mdata'(0),
+            wr_hdr_params
+        );
+    end
 
-    // Control logic for memory writes
     always_ff @(posedge clk)
     begin
         if (reset)
@@ -513,12 +379,8 @@ module app_afu
         end
         else
         begin
-            // Request the write as long as the channel isn't full.
-            fiu.c1Tx.valid <= ((state == STATE_WRITE_RESULT) && //will do the writing in the run state
-                               ! fiu.c1TxAlmFull);
+            fiu.c1Tx <= cci_mpf_genC1TxWriteReq(wr_hdr, data_in, data_in_en);
         end
-
-        fiu.c1Tx.hdr <= wr_hdr;
     end
 
 
@@ -543,6 +405,12 @@ endmodule // app_afu
 
 
 /*
+once compressing, writing will probably get harder
+need a fifo probably???
+if an input is x bits wide
+the output could be x-y or x+y or x or whatever bits wide
+likely shove it all into a fifo that gets consumed down here
+
 
 beneath is a fifo
 it needs to take in an extra input, din_used
@@ -561,6 +429,7 @@ TODO: this fifo is currently doesnt take in din_used and is written
     in verilog
 make q 1d, just a long circular buffer
 output 32 bits every cycle rd_en is set
+will need parameters: input width, size, output width
 
 */
 

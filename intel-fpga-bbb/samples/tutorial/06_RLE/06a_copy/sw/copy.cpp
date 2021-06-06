@@ -45,32 +45,40 @@ using namespace std;
 using namespace opae::fpga::types;
 using namespace opae::fpga::bbb::mpf::types;
 
-// State from the AFU's JSON file, extracted using OPAE's afu_json_mgr script
 #include "afu_json_info.h"
 
-const int INPUT_INTS = 1024; //arbitrary for now
-
 //for now, just use ints. ghostsz apparently uses ints, floats, and doubles
-//one memory line is 64 bytes - is this relevant?
-//just using this struct to keep code close to tutorial
-typedef struct t_mem
-{
-    int data[INPUT_INTS];
-}
-t_mem;
+//read in one line at a time
+//one line is 64 bytes, or 16 ints
+const int LINE_BYTES = 64;
+const int INPUT_LINES = 10; //arbitrary for now
 
-t_mem* initMem(t_mem* head)
+struct t_line
 {
+    int data[16];
+};
+
+t_line* initMem(t_line* ptr) //ptr points to the first t_line
+{
+    t_line* p = ptr;
     int v = 1; //different contents will compress differently, replace this
 
-    for (int i = 0; i < INPUT_INTS; i += 1)
+    for (int i = 0; i < INPUT_LINES; i++)
     {
-        head->data[i] = v++;
+        for (int j = 0; j < 16; j++)
+        {
+            p->data[j] = v++;
+        }
+
+        //no need for this syntax rather than an array of t_lines, just staying close to the example
+        t_line* p_next = (t_line*)(intptr_t(p) + LINE_BYTES);
+        
+        p = p_next;
     }
 
     std::atomic_thread_fence(std::memory_order_seq_cst);
 
-    return head;
+    return ptr;
 }
 
 /*
@@ -90,12 +98,12 @@ int main(int argc, char *argv[])
     assert(fpga.isOk());
     CSR_MGR csrs(fpga);
 
-    int input_bytes = INPUT_INTS * 4;
+    int input_bytes = INPUT_LINES * LINE_BYTES;
     auto input_buf_handle = fpga.allocBuffer(input_bytes);
     auto input_buf = reinterpret_cast<volatile uint64_t*>(input_buf_handle->c_type());
     assert(NULL != input_buf);
-    csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t? ill just roll with it
-    csrs.writeCSR(1, INPUT_INTS);
+    csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t?
+    csrs.writeCSR(1, INPUT_LINES);
 
     initMem(const_cast<t_mem*>(input_buf));
 
@@ -125,11 +133,11 @@ int main(int argc, char *argv[])
     int v = 1;
     int n_errors = 0;
 
-    used_output_bytes = csrs.readCSR(3) * 4;
+    int output_ints = csrs.readCSR(3) * 16;
 
-    for (int i = 0; i < used_output_bytes; i++)
+    for (int i = 0; i < output_ints; i++)
     {
-        if (*(output_buf + i) != v++)
+        if ((int)*(output_buf + i) != v++)
             n_errors++;
     }
 
