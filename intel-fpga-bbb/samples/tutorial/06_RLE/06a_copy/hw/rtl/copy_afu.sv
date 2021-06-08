@@ -126,12 +126,33 @@ module app_afu
 
     always_ff @(posedge clk)
     begin
-        if (csrs.cpu_wr_csrs[4].en)
+        if (csrs.cpu_wr_csrs[0].en)
         begin
             input_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[0].data);
-            input_length <= csrs.cpu_wr_csrs[1].data;
-            output_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
+            $display("Received input address: 0x%x", byteAddrToClAddr(csrs.cpu_wr_csrs[0].data));
         end
+
+        if (csrs.cpu_wr_csrs[1].en)
+        begin
+            input_length <= csrs.cpu_wr_csrs[1].data;
+            $display("Received input length: %0d", csrs.cpu_wr_csrs[1].data);
+        end
+
+        if (csrs.cpu_wr_csrs[2].en)
+        begin
+            output_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
+            $display("Received output address: 0x%x", byteAddrToClAddr(csrs.cpu_wr_csrs[2].data));
+        end
+
+        // if (csrs.cpu_wr_csrs[4].en)
+        // begin
+        //     input_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[0].data);
+        //     input_length <= csrs.cpu_wr_csrs[1].data;
+        //     output_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
+        //     $display("Received input address: 0x%x", byteAddrToClAddr(csrs.cpu_wr_csrs[0].data));
+        //     $display("Received input length: %0d", csrs.cpu_wr_csrs[1].data);
+        //     $display("Received output address: 0x%x", byteAddrToClAddr(csrs.cpu_wr_csrs[2].data));
+        // end
 
         start <= csrs.cpu_wr_csrs[4].en;
     end
@@ -179,8 +200,7 @@ module app_afu
                         done <= 1'b0;
                         output_length <= 16'b0;
                         state <= STATE_RUN;
-                        $display("AFU starting at 0x%x",
-                                 clAddrToByteAddr(input_addr));
+                        $display("AFU starting at 0x%x", input_addr);
                     end
                 end
 
@@ -199,8 +219,7 @@ module app_afu
                     if (data_in_en) //rd_last_beat_received needed to wait for 4 lines. only using 1 line, so use first (only) response
                     begin
                         state <= STATE_DONE;
-                        $display("AFU write result to 0x%x",
-                                 clAddrToByteAddr(wr_addr));
+                        $display("AFU write last result to 0x%x", wr_addr);
                     end
                 end
 
@@ -289,26 +308,43 @@ module app_afu
         else
         begin
             fiu.c0Tx <= cci_mpf_genC0TxReadReq(rd_hdr, (rd_needed && ! fiu.c0TxAlmFull));
-            // if (rd_needed && ! fiu.c0TxAlmFull)
-            // begin
-            //     $display("  Reading from VA 0x%x", clAddrToByteAddr(rd_addr));
-            // end
+            if (rd_needed && ! fiu.c0TxAlmFull)
+            begin
+                $display("    Read req from VA: 0x%x", rd_addr);
+            end
         end
     end
 
     logic [511:0] data_in;
 
-//interesting... each line comes indepently on the bus, right?
-//if all being added to the hash and order matteres, bus maintains order?
+//interesting... each line comes indepently on the bus? this is probably wrong...
+//if all being added to the hash and order matters, must cache lines maintain order
     always_ff @(posedge clk)
     begin
         data_in_en <= cci_c0Rx_isReadRsp(fiu.c0Rx);
         data_in <= fiu.c0Rx.data[511:0];
 
-        // if (cci_c0Rx_isReadRsp(fiu.c0Rx))
-        // begin
-        //     $display("    Received entry v: %0d", fiu.c0Rx.data[511:0]);
-        // end
+        if (cci_c0Rx_isReadRsp(fiu.c0Rx))
+        begin
+            $display("    Received values: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x",
+                fiu.c0Rx.data[31:0],
+                fiu.c0Rx.data[63:32],
+                fiu.c0Rx.data[95:64],
+                fiu.c0Rx.data[127:96],
+                fiu.c0Rx.data[159:128],
+                fiu.c0Rx.data[191:160],
+                fiu.c0Rx.data[223:192],
+                fiu.c0Rx.data[255:224],
+                fiu.c0Rx.data[287:256],
+                fiu.c0Rx.data[319:288],
+                fiu.c0Rx.data[351:320],
+                fiu.c0Rx.data[383:352],
+                fiu.c0Rx.data[415:384],
+                fiu.c0Rx.data[447:416],
+                fiu.c0Rx.data[479:448],
+                fiu.c0Rx.data[511:480]
+            );
+        end
     end
 
 
@@ -343,7 +379,7 @@ module app_afu
             //might want more than one write in flight? just one for now, keep current wr_needed logic
             if (wr_needed)
             begin
-                wr_needed <= fiu.c1TxAlmFull; //'TxAlmFull' for both rd and wr?
+                wr_needed <= fiu.c1TxAlmFull; //'TxAlmFull' for both rd and wr
             end
             else
             begin

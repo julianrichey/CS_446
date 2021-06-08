@@ -85,9 +85,9 @@ t_line* initMem(t_line* ptr) //ptr points to the first t_line
 /*
 CSRs
 0: write ptr to input buffer
-1: write number of elements in input buffer
+1: write number of lines in input buffer
 2: write ptr to output buffer
-3: read number of elements in used portion of output buffer
+3: read number of lines in used portion of output buffer
 4: read whether the afu has finished
 
 example reuses CSRs, but for no now need
@@ -103,7 +103,9 @@ int main(int argc, char *argv[])
     auto input_buf_handle = fpga.allocBuffer(input_bytes);
     auto input_buf = reinterpret_cast<volatile t_line*>(input_buf_handle->c_type());
     assert(NULL != input_buf);
+    cout << "input_buf: 0x" << hex << intptr_t(input_buf) << endl;
     csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t?
+    cout << "input_lines: " << dec << INPUT_LINES << endl;
     csrs.writeCSR(1, INPUT_LINES);
 
     initMem(const_cast<t_line*>(input_buf));
@@ -113,6 +115,7 @@ int main(int argc, char *argv[])
     auto output_buf = reinterpret_cast<volatile int*>(output_buf_handle->c_type());
     assert(NULL != output_buf);
     output_buf[0] = 0; //probably delete this line
+    cout << "output_buf: 0x" << hex << intptr_t(output_buf) << endl;
     csrs.writeCSR(2, intptr_t(output_buf));
 
     csrs.writeCSR(3, 0);
@@ -124,8 +127,10 @@ int main(int argc, char *argv[])
 
     //control signal indicating done
     //cant use normal output, as last written index not known ahead of time
+    cout << "begin";
     while (0 == csrs.readCSR(4))
     {
+        cout << "while";
         nanosleep(&pause, NULL);
     };
 
@@ -140,7 +145,7 @@ int main(int argc, char *argv[])
     {
         if (*(output_buf + i*4) != v++)
             n_errors++;
-            cout << *(output_buf + i*4);
+            //cout << *(output_buf + i*4);
     }
 
     cout << "Number of memcpy errors: " << n_errors;
