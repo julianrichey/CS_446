@@ -144,16 +144,6 @@ module app_afu
             $display("Received output address: 0x%x", byteAddrToClAddr(csrs.cpu_wr_csrs[2].data));
         end
 
-        // if (csrs.cpu_wr_csrs[4].en)
-        // begin
-        //     input_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[0].data);
-        //     input_length <= csrs.cpu_wr_csrs[1].data;
-        //     output_addr <= byteAddrToClAddr(csrs.cpu_wr_csrs[2].data);
-        //     $display("Received input address: 0x%x", byteAddrToClAddr(csrs.cpu_wr_csrs[0].data));
-        //     $display("Received input length: %0d", csrs.cpu_wr_csrs[1].data);
-        //     $display("Received output address: 0x%x", byteAddrToClAddr(csrs.cpu_wr_csrs[2].data));
-        // end
-
         start <= csrs.cpu_wr_csrs[4].en;
     end
 
@@ -175,11 +165,10 @@ module app_afu
     t_state;
 
     t_state state;
-    // Status signals that affect state changes
-    logic rd_end_of_input;
-    // logic rd_last_beat_received;
-    logic data_in_en;
-    // cl wr addr
+
+    logic rd_end_of_input; //flag only for state change
+    logic wr_done; //flag only for state change
+
     t_cci_clAddr wr_addr;
 
     always_ff @(posedge clk)
@@ -215,9 +204,9 @@ module app_afu
                     end
                 end
 
-              STATE_END_OF_INPUT: //TODO: figure out how states change from here.
+              STATE_END_OF_INPUT:
                 begin
-                    if (data_in_en) //rd_last_beat_received needed to wait for 4 lines. only using 1 line, so use first (only) response
+                    if (wr_done)
                     begin
                         state <= STATE_DONE;
                         $display("AFU write last result to 0x%x", wr_addr);
@@ -226,7 +215,7 @@ module app_afu
 
               STATE_DONE:
                 begin
-                    if (! fiu.c1TxAlmFull)
+                    if (! fiu.c1TxAlmFull) //this if is probably useless
                     begin
                         done <= 1'b1;
                         output_length <= wr_addr - output_addr + 1;
@@ -252,9 +241,26 @@ module app_afu
     
     always_ff @(posedge clk)
     begin
-        rd_addr_next_valid <= cci_c0Rx_isReadRsp(fiu.c0Rx);
-        rd_addr_next <= (cci_c0Rx_isReadRsp(fiu.c0Rx) ? rd_addr + 1 : rd_addr);
-        rd_end_of_input <= (rd_addr == (input_addr + input_length - 1));
+        if (reset)
+        begin
+            rd_addr_next_valid <= 1'b0;
+            rd_end_of_input <= 1'b0;
+        end
+        else
+        begin
+            rd_addr_next_valid <= cci_c0Rx_isReadRsp(fiu.c0Rx);
+            rd_addr_next <= (cci_c0Rx_isReadRsp(fiu.c0Rx) ? rd_addr + 1 : rd_addr);
+
+            if (cci_c0Rx_isReadRsp(fiu.c0Rx))
+            begin
+                $display("Read rsp %x", rd_addr[3:0]);
+            end
+
+            if (cci_c0Rx_isReadRsp(fiu.c0Rx) && (rd_addr == input_addr + input_length - 1))
+            begin
+                rd_end_of_input <= 1'b1;
+            end
+        end
     end
 
     logic rd_needed;
@@ -267,14 +273,13 @@ module app_afu
         end
         else
         begin
-            //might want more than one read in flight? just one for now, keep current rd_needed logic
             if (rd_needed)
             begin
                 rd_needed <= fiu.c0TxAlmFull;
             end
             else
             begin
-                rd_needed <= (start || (rd_addr_next_valid && ! rd_end_of_input));
+                rd_needed <= (start || (rd_addr_next_valid && (state == STATE_RUN)));
                 rd_addr <= (start ? input_addr : rd_addr_next);
             end
         end
@@ -305,43 +310,55 @@ module app_afu
         end
         else
         begin
-            fiu.c0Tx <= cci_mpf_genC0TxReadReq(rd_hdr, (rd_needed && ! fiu.c0TxAlmFull));
-            if (rd_needed && ! fiu.c0TxAlmFull)
+            fiu.c0Tx <= cci_mpf_genC0TxReadReq(rd_hdr, (rd_needed && (state == STATE_RUN) && ! fiu.c0TxAlmFull));
+
+            if (rd_needed && (state == STATE_RUN) && ! fiu.c0TxAlmFull)
             begin
-                $display("    Read req from VA: 0x%x", rd_addr);
+                // $display("    Read req from VA: 0x%x", rd_addr);
+                $display("Read req %x", rd_addr[3:0]);
             end
         end
     end
 
     logic [511:0] data_in;
+    logic data_in_en;
 
-//interesting... each line of a read response comes indepently on the bus? maybe not 'independently', but separately?
-//if all being added to the hash and order matters, must cache lines maintain order
     always_ff @(posedge clk)
     begin
-        data_in_en <= cci_c0Rx_isReadRsp(fiu.c0Rx);
-        data_in <= fiu.c0Rx.data[511:0];
-
-        if (cci_c0Rx_isReadRsp(fiu.c0Rx))
+        if (reset)
         begin
-            $display("    Received values: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n    0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x",
-                fiu.c0Rx.data[31:0],
-                fiu.c0Rx.data[63:32],
-                fiu.c0Rx.data[95:64],
-                fiu.c0Rx.data[127:96],
-                fiu.c0Rx.data[159:128],
-                fiu.c0Rx.data[191:160],
-                fiu.c0Rx.data[223:192],
-                fiu.c0Rx.data[255:224],
-                fiu.c0Rx.data[287:256],
-                fiu.c0Rx.data[319:288],
-                fiu.c0Rx.data[351:320],
-                fiu.c0Rx.data[383:352],
-                fiu.c0Rx.data[415:384],
-                fiu.c0Rx.data[447:416],
-                fiu.c0Rx.data[479:448],
-                fiu.c0Rx.data[511:480]
-            );
+            data_in_en <= 1'b0;
+            data_in <= 512'b0;
+        end
+        else
+        begin
+            data_in_en <= cci_c0Rx_isReadRsp(fiu.c0Rx);
+            if (cci_c0Rx_isReadRsp(fiu.c0Rx))
+            begin
+                data_in <= fiu.c0Rx.data[511:0];
+            end
+
+            // if (cci_c0Rx_isReadRsp(fiu.c0Rx))
+            // begin
+            //     $display("    Received values: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n    0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x",
+            //         fiu.c0Rx.data[31:0],
+            //         fiu.c0Rx.data[63:32],
+            //         fiu.c0Rx.data[95:64],
+            //         fiu.c0Rx.data[127:96],
+            //         fiu.c0Rx.data[159:128],
+            //         fiu.c0Rx.data[191:160],
+            //         fiu.c0Rx.data[223:192],
+            //         fiu.c0Rx.data[255:224],
+            //         fiu.c0Rx.data[287:256],
+            //         fiu.c0Rx.data[319:288],
+            //         fiu.c0Rx.data[351:320],
+            //         fiu.c0Rx.data[383:352],
+            //         fiu.c0Rx.data[415:384],
+            //         fiu.c0Rx.data[447:416],
+            //         fiu.c0Rx.data[479:448],
+            //         fiu.c0Rx.data[511:480]
+            //     );
+            // end
         end
     end
 
@@ -358,40 +375,71 @@ module app_afu
     // =========================================================================
 
     
-    logic buffer_consumed; //set once input all contents have been consumed from buffer (rd_end_of_input && buff_empty)
-    assign buffer_consumed = rd_end_of_input; //for copy, buffer not used. is this correct???
+    logic buffer_consumed; //set once input all contents have been consumed from buffer- tbd
 
     t_cci_clAddr wr_addr_next;
     logic wr_addr_next_valid;
     logic data_in_en_happened;
     logic write_rsp_happened;
+    logic first_write;
+    logic first_write_flag;
 
     always_ff @(posedge clk)
     begin
-        wr_addr_next <= (cci_c1Rx_isWriteRsp(fiu.c1Tx) ? wr_addr + 1 : wr_addr);
-
-        if (data_in_en_happened && write_rsp_happened)
+        if (reset)
         begin
-            wr_addr_next_valid <= 1'b1;
-            data_in_en_happened <= data_in_en ? 1'b1 : 1'b0;
-            write_rsp_happened <= cci_c1Rx_isWriteRsp(fiu.c1Tx) ? 1'b1 : 1'b0;
+            wr_addr_next_valid <= 1'b0;
+            data_in_en_happened <= 1'b0;
+            write_rsp_happened <= 1'b1;
+            first_write <= 1'b0;
+            first_write_flag <= 1'b1;
+            wr_done <= 1'b0;
         end
         else
         begin
-            wr_addr_next_valid <= 1'b0;
-
-            //assume 1 req in flight for both read and write
-            //so, data_in_en would never be set while data_in_en_happened is set
-            //because a write rsp must have happened in the meantime
-
-            if (data_in_en)
+            if (data_in_en_happened && write_rsp_happened)
             begin
-                data_in_en_happened <= 1'b1;
+                // $display("data_in_en_happened && write_rsp_happened");
+                wr_addr_next_valid <= 1'b1;
+                wr_addr_next <= wr_addr + 1;
+                if (first_write_flag)
+                begin
+                    first_write <= 1'b1;
+                    first_write_flag <= 1'b0;
+                end
+                else
+                begin
+                    first_write <= 1'b0;
+                end
+
+                data_in_en_happened <= data_in_en ? 1'b1 : 1'b0;
+                write_rsp_happened <= cci_c1Rx_isWriteRsp(fiu.c1Tx) ? 1'b1 : 1'b0;
             end
-
-            if (cci_c1Rx_isWriteRsp(fiu.c1Tx))
+            else
             begin
-                write_rsp_happened <= 1'b1;
+                wr_addr_next_valid <= 1'b0;
+                wr_addr_next <= wr_addr;
+
+                //assume 1 req in flight for both read and write
+                //so, data_in_en would never be set while data_in_en_happened is set
+                //because a write rsp must have happened in the meantime
+
+                if (data_in_en)
+                begin
+                    // $display("data_in_en");
+                    // $display("%x", data_in);
+                    data_in_en_happened <= 1'b1;
+                end
+
+                if (cci_c1Rx_isWriteRsp(fiu.c1Tx))
+                begin
+                    $display("Write rsp %x", wr_addr[3:0]);
+                    if (buffer_consumed)
+                    begin
+                        wr_done <= 1'b1;
+                    end
+                    write_rsp_happened <= 1'b1;
+                end
             end
         end
     end
@@ -403,10 +451,10 @@ module app_afu
         if (reset)
         begin
             wr_needed <= 1'b0;
+            wr_addr <= 0;
         end
         else
         begin
-            //might want more than one write in flight? just one for now, keep current wr_needed logic
             if (wr_needed)
             begin
                 wr_needed <= fiu.c1TxAlmFull; //'TxAlmFull' for both rd and wr
@@ -414,7 +462,7 @@ module app_afu
             else
             begin
                 wr_needed <= (wr_addr_next_valid && ! buffer_consumed);
-                wr_addr <= (start ? output_addr : wr_addr_next);
+                wr_addr <= (first_write ? output_addr : wr_addr_next); //replace start with something more sensible. oh jeez @ -1
             end
         end
     end
@@ -441,14 +489,21 @@ module app_afu
         if (reset)
         begin
             fiu.c1Tx.valid <= 1'b0;
+            buffer_consumed <= 1'b0;
         end
         else
         begin
-            fiu.c1Tx <= cci_mpf_genC1TxWriteReq(wr_hdr, data_in, (wr_needed && ! fiu.c1TxAlmFull));
             if (wr_needed && ! fiu.c1TxAlmFull)
             begin
-                $display("    Write req to VA: 0x%x", wr_addr);
+                // $display("    Write req to VA: 0x%x", wr_addr);
+                $display("Write req %x", wr_addr[3:0]);
+                // $display("%x", data_in);
+                if (state == STATE_END_OF_INPUT)
+                begin
+                    buffer_consumed <= 1'b1;
+                end
             end
+            fiu.c1Tx <= cci_mpf_genC1TxWriteReq(wr_hdr, data_in, (wr_needed && ! fiu.c1TxAlmFull));
         end
     end
 

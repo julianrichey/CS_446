@@ -123,7 +123,7 @@ int main(int argc, char *argv[])
 
     struct timespec pause;
     pause.tv_sec = (fpga.hwIsSimulated() ? 1 : 0);
-    pause.tv_nsec = 2500000; //could adjust this but probably doesnt matter
+    pause.tv_nsec = 2500000;
 
     //control signal indicating done
     //cant use normal output, as last written index not known ahead of time
@@ -133,40 +133,27 @@ int main(int argc, char *argv[])
         nanosleep(&pause, NULL);
     };
 
-    //confirm output
+    nanosleep(&pause, NULL); //some amount of time here is necessary to give time to receive the last cache line
 
+    //confirm output
     int v = 1;
     int n_errors = 0;
 
-    int output_ints = csrs.readCSR(3) * 16;
+    int output_bytes_real = csrs.readCSR(3) * 64;
     cout << "CSR4=" << csrs.readCSR(4) << endl;
     cout << "CSR3=" << csrs.readCSR(3) << endl;
-    cout << "output_ints= " << output_ints << endl;
+    cout << "output_bytes_real= " << dec << output_bytes_real << endl;
 
-    for (int i = 0; i < output_ints; i++)
+    for (int i = 0; i < output_bytes_real / 4; i++)
     {
-        cout << *(output_buf + i*4);
-        if (*(output_buf + i*4) != v++)
+        cout << hex << output_buf[i] << " ";
+        
+        if (output_buf[i] != v++)
             n_errors++;
     }
 
-    cout << "Number of memcpy errors: " << n_errors;
+    cout << "Number of copy errors: " << dec << n_errors << endl;
 
-
-    // // Hash is stored in result_buf[1]
-    // uint64_t r = result_buf[1];
-    // cout << "Hash: 0x" << hex << r << dec << "  ["
-    //      << ((0x5726aa1d == r) ? "Correct" : "ERROR")
-    //      << "]" << endl << endl;
-
-    // // Reads CSRs to get some statistics
-    // cout << "# List length: " << csrs.readCSR(0) << endl
-    //      << "# Linked list data entries read: " << csrs.readCSR(1) << endl;
-
-    // cout << "#" << endl
-    //      << "# AFU frequency: " << csrs.getAFUMHz() << " MHz"
-    //      << (fpga.hwIsSimulated() ? " [simulated]" : "")
-    //      << endl;
 
     // MPF VTP (virtual to physical) statistics
     mpf_handle::ptr_t mpf = fpga.mpf;
@@ -194,23 +181,17 @@ int main(int argc, char *argv[])
 
 
 
-/*
-# VTP PT walk cycles: 1122
-# VTP L2 4KB hit / miss: 0 / 1
-# VTP L2 2MB hit / miss: 0 / 8
-
-#   Transaction count   |       VA      VL0      VH0      VH1 |    MCL-1    MCL-2    MCL-4              
-#   ========================================================================================            
-#   MMIOWrReq          25 |                                                                             
-#   MMIORdReq          30 |                                                                             
-#   MMIORdRsp          30 |                                                                             
-#   IntrReq             0 |                                                                             
-#   IntrResp            0 |                                                                             
-#   RdReq             135 |       39        0        0        0 |        7        0       32            
-#   RdResp            135 |        0       68       34       33 |                                       
-#   WrReq               1 |        1        0        0        0 |        1        0        0            
-#   WrResp              1 |        0        1        0        0 |        1        0        0            
-#   WrFence             0 |        0        0        0        0 |                                       
-#   WrFenRsp            0 |        0        0        0        0 |                                       
-
-*/
+// For INPUT_LINES = 5
+// #   Transaction count   |       VA      VL0      VH0      VH1 |    MCL-1    MCL-2    MCL-4
+// #   ========================================================================================
+// #   MMIOWrReq          14 |
+// #   MMIORdReq          56 |
+// #   MMIORdRsp          56 |
+// #   IntrReq             0 |
+// #   IntrResp            0 |
+// #   RdReq              10 |       10        0        0        0 |       10        0        0
+// #   RdResp             10 |        0        5        3        2 |
+// #   WrReq               5 |        5        0        0        0 |        5        0        0
+// #   WrResp              5 |        0        3        1        1 |        5        0        0
+// #   WrFence             0 |        0        0        0        0 |
+// #   WrFenRsp            0 |        0        0        0        0 |
