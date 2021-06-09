@@ -51,7 +51,7 @@ using namespace opae::fpga::bbb::mpf::types;
 //read in one line at a time
 //one line is 64 bytes, or 16 ints
 const int LINE_BYTES = 64;
-const int INPUT_LINES = 10; //arbitrary for now
+const int INPUT_LINES = 5; //arbitrary for now
 
 typedef struct t_line
 {
@@ -103,9 +103,9 @@ int main(int argc, char *argv[])
     auto input_buf_handle = fpga.allocBuffer(input_bytes);
     auto input_buf = reinterpret_cast<volatile t_line*>(input_buf_handle->c_type());
     assert(NULL != input_buf);
-    cout << "input_buf: 0x" << hex << intptr_t(input_buf) << endl;
+    cout << "input_buf= 0x" << hex << intptr_t(input_buf) << endl;
     csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t?
-    cout << "input_lines: " << dec << INPUT_LINES << endl;
+    cout << "input_lines= " << dec << INPUT_LINES << endl;
     csrs.writeCSR(1, INPUT_LINES);
 
     initMem(const_cast<t_line*>(input_buf));
@@ -115,7 +115,7 @@ int main(int argc, char *argv[])
     auto output_buf = reinterpret_cast<volatile int*>(output_buf_handle->c_type());
     assert(NULL != output_buf);
     output_buf[0] = 0; //probably delete this line
-    cout << "output_buf: 0x" << hex << intptr_t(output_buf) << endl;
+    cout << "output_buf= 0x" << hex << intptr_t(output_buf) << endl;
     csrs.writeCSR(2, intptr_t(output_buf));
 
     csrs.writeCSR(3, 0);
@@ -127,10 +127,9 @@ int main(int argc, char *argv[])
 
     //control signal indicating done
     //cant use normal output, as last written index not known ahead of time
-    cout << "begin";
     while (0 == csrs.readCSR(4))
     {
-        cout << "while";
+        cout << "CSR4=0 ";
         nanosleep(&pause, NULL);
     };
 
@@ -140,12 +139,15 @@ int main(int argc, char *argv[])
     int n_errors = 0;
 
     int output_ints = csrs.readCSR(3) * 16;
+    cout << "CSR4=" << csrs.readCSR(4) << endl;
+    cout << "CSR3=" << csrs.readCSR(3) << endl;
+    cout << "output_ints= " << output_ints << endl;
 
     for (int i = 0; i < output_ints; i++)
     {
+        cout << *(output_buf + i*4);
         if (*(output_buf + i*4) != v++)
             n_errors++;
-            //cout << *(output_buf + i*4);
     }
 
     cout << "Number of memcpy errors: " << n_errors;

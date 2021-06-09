@@ -179,6 +179,7 @@ module app_afu
     logic rd_end_of_input;
     // logic rd_last_beat_received;
     logic data_in_en;
+    // cl wr addr
     t_cci_clAddr wr_addr;
 
     always_ff @(posedge clk)
@@ -244,6 +245,7 @@ module app_afu
     //
     // =========================================================================
 
+    //cl rd addr
     t_cci_clAddr rd_addr;
     t_cci_clAddr rd_addr_next;
     logic rd_addr_next_valid;
@@ -251,13 +253,10 @@ module app_afu
     always_ff @(posedge clk)
     begin
         rd_addr_next_valid <= cci_c0Rx_isReadRsp(fiu.c0Rx);
-        rd_addr_next <= rd_addr + 1;
-        //rd_addr or rd_addr_next? probably rd_addr_next because in example,
-        //rd_end_of_input is set once rd_addr_next is NULL
-        rd_end_of_input <= (rd_addr_next == (input_addr + input_length));
+        rd_addr_next <= (cci_c0Rx_isReadRsp(fiu.c0Rx) ? rd_addr + 1 : rd_addr);
+        rd_end_of_input <= (rd_addr == (input_addr + input_length - 1));
     end
 
-    //hold request until can be sent (have next address, not full)
     logic rd_needed;
 
     always_ff @(posedge clk)
@@ -275,7 +274,6 @@ module app_afu
             end
             else
             begin
-                //rd_addr_next_valid always set, could slow down input by setting every x cycles
                 rd_needed <= (start || (rd_addr_next_valid && ! rd_end_of_input));
                 rd_addr <= (start ? input_addr : rd_addr_next);
             end
@@ -317,7 +315,7 @@ module app_afu
 
     logic [511:0] data_in;
 
-//interesting... each line comes indepently on the bus? this is probably wrong...
+//interesting... each line of a read response comes indepently on the bus? maybe not 'independently', but separately?
 //if all being added to the hash and order matters, must cache lines maintain order
     always_ff @(posedge clk)
     begin
@@ -326,7 +324,7 @@ module app_afu
 
         if (cci_c0Rx_isReadRsp(fiu.c0Rx))
         begin
-            $display("    Received values: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x",
+            $display("    Received values: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n    0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x",
                 fiu.c0Rx.data[31:0],
                 fiu.c0Rx.data[63:32],
                 fiu.c0Rx.data[95:64],
@@ -348,25 +346,57 @@ module app_afu
     end
 
 
+    //TODO
+    //compression
+    //  can be fake- just something to change data size somehow
+    //circular buffer
+
     // =========================================================================
     //
     //   Write logic.
     //
     // =========================================================================
 
+    
+    logic buffer_consumed; //set once input all contents have been consumed from buffer (rd_end_of_input && buff_empty)
+    assign buffer_consumed = rd_end_of_input; //for copy, buffer not used. is this correct???
+
     t_cci_clAddr wr_addr_next;
-    logic wr_addr_next_valid; //delete? maybe not if need to check against upper bound, if it exists
+    logic wr_addr_next_valid;
+    logic data_in_en_happened;
+    logic write_rsp_happened;
 
     always_ff @(posedge clk)
     begin
-        wr_addr_next_valid <= cci_c1Rx_isWriteRsp(fiu.c1Tx); 
-        wr_addr_next <= wr_addr + 1;
+        wr_addr_next <= (cci_c1Rx_isWriteRsp(fiu.c1Tx) ? wr_addr + 1 : wr_addr);
+
+        if (data_in_en_happened && write_rsp_happened)
+        begin
+            wr_addr_next_valid <= 1'b1;
+            data_in_en_happened <= data_in_en ? 1'b1 : 1'b0;
+            write_rsp_happened <= cci_c1Rx_isWriteRsp(fiu.c1Tx) ? 1'b1 : 1'b0;
+        end
+        else
+        begin
+            wr_addr_next_valid <= 1'b0;
+
+            //assume 1 req in flight for both read and write
+            //so, data_in_en would never be set while data_in_en_happened is set
+            //because a write rsp must have happened in the meantime
+
+            if (data_in_en)
+            begin
+                data_in_en_happened <= 1'b1;
+            end
+
+            if (cci_c1Rx_isWriteRsp(fiu.c1Tx))
+            begin
+                write_rsp_happened <= 1'b1;
+            end
+        end
     end
 
-    //hold request until can be sent (have next address, not full)
-    logic wr_needed; //just assume we can always write? or does the example skip checking bc only one write???
-    logic buffer_consumed; //set once input contents have been consumed from buffer
-    assign buffer_consumed = rd_end_of_input; //for copy, buffer not used
+    logic wr_needed;
 
     always_ff @(posedge clk)
     begin
@@ -383,8 +413,7 @@ module app_afu
             end
             else
             begin
-                //wr_addr_next_valid always set, could slow down input by setting every x cycles
-                wr_needed <= (start || (wr_addr_next_valid || ! buffer_consumed));
+                wr_needed <= (wr_addr_next_valid && ! buffer_consumed);
                 wr_addr <= (start ? output_addr : wr_addr_next);
             end
         end
@@ -415,7 +444,11 @@ module app_afu
         end
         else
         begin
-            fiu.c1Tx <= cci_mpf_genC1TxWriteReq(wr_hdr, data_in, data_in_en);
+            fiu.c1Tx <= cci_mpf_genC1TxWriteReq(wr_hdr, data_in, (wr_needed && ! fiu.c1TxAlmFull));
+            if (wr_needed && ! fiu.c1TxAlmFull)
+            begin
+                $display("    Write req to VA: 0x%x", wr_addr);
+            end
         end
     end
 
