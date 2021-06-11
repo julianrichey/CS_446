@@ -62,7 +62,7 @@ t_line;
 t_line* initMem(t_line* ptr) //ptr points to the first t_line
 {
     t_line* p = ptr;
-    int v = 1; //different contents will compress differently, replace this
+    int v = 1; //different contents will compress differently, replace this with other data as needed
 
     for (int i = 0; i < INPUT_LINES; i++)
     {
@@ -88,9 +88,7 @@ CSRs
 1: write number of lines in input buffer
 2: write ptr to output buffer
 3: read number of lines in used portion of output buffer
-4: read whether the afu has finished
-
-example reuses CSRs, but for no now need
+4: write to start afu, read whether the afu has finished
 */
 
 int main(int argc, char *argv[])
@@ -104,22 +102,22 @@ int main(int argc, char *argv[])
     auto input_buf = reinterpret_cast<volatile t_line*>(input_buf_handle->c_type());
     assert(NULL != input_buf);
     cout << "input_buf= 0x" << hex << intptr_t(input_buf) << endl;
-    csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t?
+    csrs.writeCSR(0, intptr_t(input_buf)); //intptr_t -> uint64_t? assume this is fine
     cout << "input_lines= " << dec << INPUT_LINES << endl;
     csrs.writeCSR(1, INPUT_LINES);
 
     initMem(const_cast<t_line*>(input_buf));
 
-    int output_bytes = input_bytes * 2; //adjust based on worst case
+    int output_bytes = input_bytes * 2; //once compressing, adjust based on worst case compression ratio
     auto output_buf_handle = fpga.allocBuffer(output_bytes);
     auto output_buf = reinterpret_cast<volatile int*>(output_buf_handle->c_type());
     assert(NULL != output_buf);
-    output_buf[0] = 0; //probably delete this line
+    output_buf[0] = 0; //not needed, only useful if checking for output_buf being filled. CSR4 'done' accomplishes this indirectly
     cout << "output_buf= 0x" << hex << intptr_t(output_buf) << endl;
     csrs.writeCSR(2, intptr_t(output_buf));
 
     csrs.writeCSR(3, 0);
-    csrs.writeCSR(4, 0); //fpga waiting for this
+    csrs.writeCSR(4, 0); //fpga waiting for this to start. writing 0 is fine because the enable bit is also set
 
     struct timespec pause;
     pause.tv_sec = (fpga.hwIsSimulated() ? 1 : 0);
@@ -133,7 +131,8 @@ int main(int argc, char *argv[])
         nanosleep(&pause, NULL);
     };
 
-    nanosleep(&pause, NULL); //some amount of time here is necessary to give time to receive the last cache line
+    nanosleep(&pause, NULL); // !!! some amount of time here is necessary to give time to receive the last cache line !!!
+    nanosleep(&pause, NULL); //more just in case
 
     //confirm output
     int v = 1;

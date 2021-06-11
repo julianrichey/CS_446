@@ -147,8 +147,7 @@ module app_afu
         start <= csrs.cpu_wr_csrs[4].en;
     end
 
-//rather than doing a single write at the end (state_write_result)
-//write while in state_run
+
     // =========================================================================
     //
     //   State machine
@@ -196,7 +195,7 @@ module app_afu
 
               STATE_RUN:
                 begin
-                    // rd_end_of_input is set once as input_length lines are read
+                    // rd_end_of_input is set once input_length lines get read responses
                     if (rd_end_of_input)
                     begin
                         state <= STATE_END_OF_INPUT;
@@ -206,6 +205,7 @@ module app_afu
 
               STATE_END_OF_INPUT:
                 begin
+                    // wr_done is set once a write request gets acknowledged and the output buffer is empty
                     if (wr_done)
                     begin
                         state <= STATE_DONE;
@@ -215,7 +215,7 @@ module app_afu
 
               STATE_DONE:
                 begin
-                    if (! fiu.c1TxAlmFull) //this if is probably useless
+                    if (! fiu.c1TxAlmFull) // ensure output will make it before sending
                     begin
                         done <= 1'b1;
                         output_length <= wr_addr - output_addr + 1;
@@ -234,7 +234,6 @@ module app_afu
     //
     // =========================================================================
 
-    //cl rd addr
     t_cci_clAddr rd_addr;
     t_cci_clAddr rd_addr_next;
     logic rd_addr_next_valid;
@@ -293,7 +292,7 @@ module app_afu
     begin
         rd_hdr_params = cci_mpf_defaultReqHdrParams(1);
         rd_hdr_params.vc_sel = eVC_VA;
-        rd_hdr_params.cl_len = eCL_LEN_1; //read one line for now?
+        rd_hdr_params.cl_len = eCL_LEN_1; //read one line for now. could increase in the future if wanted
         rd_hdr = cci_mpf_c0_genReqHdr(
             eREQ_RDLINE_I,
             rd_addr,
@@ -314,7 +313,6 @@ module app_afu
 
             if (rd_needed && (state == STATE_RUN) && ! fiu.c0TxAlmFull)
             begin
-                // $display("    Read req from VA: 0x%x", rd_addr);
                 $display("Read req %x", rd_addr[3:0]);
             end
         end
@@ -337,36 +335,11 @@ module app_afu
             begin
                 data_in <= fiu.c0Rx.data[511:0];
             end
-
-            // if (cci_c0Rx_isReadRsp(fiu.c0Rx))
-            // begin
-            //     $display("    Received values: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n    0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x",
-            //         fiu.c0Rx.data[31:0],
-            //         fiu.c0Rx.data[63:32],
-            //         fiu.c0Rx.data[95:64],
-            //         fiu.c0Rx.data[127:96],
-            //         fiu.c0Rx.data[159:128],
-            //         fiu.c0Rx.data[191:160],
-            //         fiu.c0Rx.data[223:192],
-            //         fiu.c0Rx.data[255:224],
-            //         fiu.c0Rx.data[287:256],
-            //         fiu.c0Rx.data[319:288],
-            //         fiu.c0Rx.data[351:320],
-            //         fiu.c0Rx.data[383:352],
-            //         fiu.c0Rx.data[415:384],
-            //         fiu.c0Rx.data[447:416],
-            //         fiu.c0Rx.data[479:448],
-            //         fiu.c0Rx.data[511:480]
-            //     );
-            // end
         end
     end
 
+// in future, put circular buffer here. not needed now because input length = output length for copy
 
-    //TODO
-    //compression
-    //  can be fake- just something to change data size somehow
-    //circular buffer
 
     // =========================================================================
     //
@@ -375,7 +348,7 @@ module app_afu
     // =========================================================================
 
     
-    logic buffer_consumed; //set once input all contents have been consumed from buffer- tbd
+    logic buffer_consumed; //set once input all contents have been consumed from buffer
 
     t_cci_clAddr wr_addr_next;
     logic wr_addr_next_valid;
@@ -399,7 +372,6 @@ module app_afu
         begin
             if (data_in_en_happened && write_rsp_happened)
             begin
-                // $display("data_in_en_happened && write_rsp_happened");
                 wr_addr_next_valid <= 1'b1;
                 wr_addr_next <= wr_addr + 1;
                 if (first_write_flag)
@@ -426,8 +398,6 @@ module app_afu
 
                 if (data_in_en)
                 begin
-                    // $display("data_in_en");
-                    // $display("%x", data_in);
                     data_in_en_happened <= 1'b1;
                 end
 
@@ -462,7 +432,7 @@ module app_afu
             else
             begin
                 wr_needed <= (wr_addr_next_valid && ! buffer_consumed);
-                wr_addr <= (first_write ? output_addr : wr_addr_next); //replace start with something more sensible. oh jeez @ -1
+                wr_addr <= (first_write ? output_addr : wr_addr_next);
             end
         end
     end
@@ -495,129 +465,18 @@ module app_afu
         begin
             if (wr_needed && ! fiu.c1TxAlmFull)
             begin
-                // $display("    Write req to VA: 0x%x", wr_addr);
                 $display("Write req %x", wr_addr[3:0]);
-                // $display("%x", data_in);
                 if (state == STATE_END_OF_INPUT)
                 begin
-                    buffer_consumed <= 1'b1;
+//this is temporary. for copy, can say buffer has been consumed once at end of input. this will no longer be true once compressing
+                    buffer_consumed <= 1'b1; 
                 end
             end
             fiu.c1Tx <= cci_mpf_genC1TxWriteReq(wr_hdr, data_in, (wr_needed && ! fiu.c1TxAlmFull));
         end
     end
 
-
-    //
-    // This AFU never handles MMIO reads.  MMIO is managed in the CSR module.
-    //
     assign fiu.c2Tx.mmioRdValid = 1'b0;
 
 endmodule // app_afu
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*
-once compressing, writing will probably get harder
-need a fifo probably???
-if an input is x bits wide
-the output could be x-y or x+y or x or whatever bits wide
-likely shove it all into a fifo that gets consumed down here
-
-
-beneath is a fifo
-it needs to take in an extra input, din_used
-x bits of input data gets converted to y bits of compressed data
-assume that y can be any value up to some multiple of x, set din width
-app_afu will give this the width of y
-
-something like this may also need to happen on the input???
-example: if doing a RLE, where the maximum run it can encode is
-    256 bits for example, would need a fifo(?) up front that keeps
-    on recording if the input is repeatedly the same
-would this even be a fifo? could it be just part of the read logic?
-
-
-TODO: this fifo is currently doesnt take in din_used and is written
-    in verilog
-make q 1d, just a long circular buffer
-output 32 bits every cycle rd_en is set
-will need parameters: input width, size, output width
-
-*/
-
-/*
-`define CLOG2(x) \
-    (x <= 2) ? 1 : \
-    (x <= 4) ? 2 : \
-    (x <= 8) ? 3 : \
-    (x <= 16) ? 4 : \
-    (x <= 32) ? 5 : \
-    (x <= 64) ? 6 : \
-    (x <= 128) ? 7 : \
-    (x <= 256) ? 8 : \
-    (x <= 512) ? 9 : \
-    (x <= 1024) ? 10 : \
-    (x <= 2048) ? 11 : \
-    (x <= 4096) ? 12 : \
-    -1
-
-module fifo #(
-    parameter FIFO_BUFFER_SIZE,
-    parameter FIFO_DATA_WIDTH
-) (
-    input reset,
-
-    input wr_clk,
-    input wr_en,
-    input [FIFO_DATA_WIDTH-1:0] din,
-    output reg full,
-
-    input rd_clk,
-    input rd_en,
-    output reg [FIFO_DATA_WIDTH-1:0] dout,
-    output reg empty
-);
-    //{} for +1 overflow (e.g. depth=8)
-    localparam idx_width = {1'b0, `CLOG2(FIFO_BUFFER_SIZE)} + 1;
-
-    reg [FIFO_DATA_WIDTH-1:0] q [FIFO_BUFFER_SIZE-1:0];
-    reg [idx_width-1:0] wr_idx;
-    reg [idx_width-1:0] rd_idx;
-
-    assign dout = q[rd_idx[idx_width-2:0]];
-    assign empty = wr_idx == rd_idx;
-    assign full = (wr_idx[idx_width-1] != rd_idx[idx_width-1]) && 
-                  (wr_idx[idx_width-2:0] == rd_idx[idx_width-2:0]);
-
-    integer i;
-    always @(posedge wr_clk) begin
-        if (reset) begin
-            wr_idx <= 0;
-            for (i=0; i<FIFO_BUFFER_SIZE; i=i+1) q[i] <= 0;
-        end else if (wr_en) begin
-            q[wr_idx[idx_width-2:0]] <= din;
-            wr_idx <= wr_idx + 1;
-        end
-    end
-
-    always @(posedge rd_clk) begin
-        if (reset) begin
-            rd_idx <= 0;
-        end else if (rd_en) begin
-            rd_idx <= rd_idx + 1;
-        end
-    end
-endmodule
-*/
